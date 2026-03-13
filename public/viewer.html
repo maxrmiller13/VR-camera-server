@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<head>
+    <style>
+            html,body{
+            margin:0;
+            padding:0;
+            overflow:hidden;
+            }
+
+            #xrCanvas{
+            width:100vw;
+            height:100vh;
+            }
+    </style>
+</head>
+<html>
+    <body>
+        <h2>Viewer</h2>
+        <button id="startVR">Start VR</button>
+        <video id="video" autoplay playsinline style="display:show"></video>
+
+        <canvas id="xrCanvas"></canvas>
+
+        <script src="/socket.io/socket.io.js"></script>
+        <script type="module" src="/viewer_connection.js"></script>
+        <script src="vr.js"></script>
+    </body>
+</html>
