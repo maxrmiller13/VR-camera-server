@@ -84,6 +84,12 @@ function createShader(type, source) {
 // -------------------------
 
 async function initGL() {
+    if (!canvas) {
+        throw new Error("xrCanvas not found in DOM");
+    }
+
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
 
     gl = canvas.getContext("webgl", { xrCompatible: true });
 
