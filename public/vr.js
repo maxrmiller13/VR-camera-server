@@ -22,6 +22,21 @@ let viewMatrixLocation;
 let modelMatrixLocation;
 let videoTextureLocation;
 
+let hasLoggedFirstFrame = false;
+let hasLoggedFirstVideoFrame = false;
+let hasLoggedVideoNotReady = false;
+
+function logGLErrors(stage) {
+    if (!gl) return;
+
+    let err = gl.getError();
+
+    while (err !== gl.NO_ERROR) {
+        console.error(`[GL ERROR] ${stage}: 0x${err.toString(16)}`);
+        err = gl.getError();
+    }
+}
+
 
 
 // -------------------------
@@ -129,18 +144,29 @@ async function initGL() {
         throw new Error("Canvas element #xrCanvas was not found");
     }
 
+    // Prefer WebGL1 for maximum XRWebGLLayer compatibility on mobile headsets.
+    // Some runtimes expose WebGL2 but fail internally when binding XR swapchains.
     gl =
-        canvas.getContext("webgl2", { xrCompatible: true, alpha: false }) ||
-        canvas.getContext("webgl", { xrCompatible: true, alpha: false }) ||
-        canvas.getContext("experimental-webgl", { xrCompatible: true, alpha: false });
+        canvas.getContext("webgl", { xrCompatible: true, alpha: false, antialias: false }) ||
+        canvas.getContext("experimental-webgl", { xrCompatible: true, alpha: false, antialias: false }) ||
+        canvas.getContext("webgl2", { xrCompatible: true, alpha: false, antialias: false });
 
     if (!gl) {
         throw new Error("Unable to create WebGL context. WebXR requires WebGL support.");
     }
 
+    console.log("GL context created:", {
+        type: gl instanceof WebGL2RenderingContext ? "webgl2" : "webgl",
+        renderer: gl.getParameter(gl.RENDERER),
+        version: gl.getParameter(gl.VERSION)
+    });
+
     // Some runtimes expose makeXRCompatible on WebGL contexts and some do not.
     if (typeof gl.makeXRCompatible === "function") {
         await gl.makeXRCompatible();
+        console.log("makeXRCompatible() completed");
+    } else {
+        console.log("makeXRCompatible() not available on this context");
     }
 
     const vertexShader = createShader(gl.VERTEX_SHADER, vertexShaderSource);
@@ -248,6 +274,9 @@ async function initGL() {
 
     gl.enable(gl.DEPTH_TEST);
 
+    console.log("initGL complete");
+    logGLErrors("initGL complete");
+
 }
 
 
@@ -259,6 +288,15 @@ async function initGL() {
 function updateVideoTexture() {
 
     if (video.readyState >= 2) {
+        if (!hasLoggedFirstVideoFrame) {
+            hasLoggedFirstVideoFrame = true;
+            console.log("First video frame ready:", {
+                readyState: video.readyState,
+                width: video.videoWidth,
+                height: video.videoHeight,
+                currentTime: video.currentTime
+            });
+        }
 
         gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, videoTexture);
@@ -271,6 +309,17 @@ function updateVideoTexture() {
             gl.UNSIGNED_BYTE,
             video
         );
+
+        logGLErrors("updateVideoTexture");
+    } else {
+        if (!hasLoggedVideoNotReady) {
+            hasLoggedVideoNotReady = true;
+            console.log("Video not ready for texture upload yet:", {
+                readyState: video.readyState,
+                paused: video.paused,
+                muted: video.muted
+            });
+        }
     }
 
 }
@@ -283,7 +332,13 @@ function updateVideoTexture() {
 
 function draw(view) {
 
+    gl.uniformMatrix4fv(projectionMatrixLocation, false, view.projectionMatrix);
+    gl.uniformMatrix4fv(viewMatrixLocation, false, view.transform.inverse.matrix);
+    gl.uniformMatrix4fv(modelMatrixLocation, false, getVideoQuadModelMatrix());
+
     gl.drawArrays(gl.TRIANGLES, 0, 6);
+
+    logGLErrors(`draw eye=${view.eye}`);
 }
 
 
@@ -300,6 +355,21 @@ function onXRFrame(time, frame) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
 
     if (pose) {
+        if (!hasLoggedFirstFrame) {
+            hasLoggedFirstFrame = true;
+            console.log("First XR frame:", {
+                viewCount: pose.views.length,
+                framebufferWidth: layer.framebufferWidth,
+                framebufferHeight: layer.framebufferHeight
+            });
+        }
+
+        updateVideoTexture();
+
+        // Clear once for the full XR framebuffer.
+        gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
 
         updateVideoTexture();
 
@@ -322,6 +392,8 @@ function onXRFrame(time, frame) {
 
             draw(view);
         }
+    } else {
+        console.warn("No viewer pose for XR frame");
     }
 
     session.requestAnimationFrame(onXRFrame);
@@ -339,6 +411,12 @@ async function startVR() {
         requiredFeatures: ["local"]
     });
 
+    console.log("XR session acquired");
+
+    session.addEventListener("end", () => {
+        console.log("XR session ended");
+    });
+
     session.updateRenderState({
         baseLayer: new XRWebGLLayer(session, gl, {
             antialias: false,
@@ -348,6 +426,8 @@ async function startVR() {
             framebufferScaleFactor: 1.0
         })
     });
+
+    logGLErrors("after session.updateRenderState");
 
     refSpace = await session.requestReferenceSpace("local");
 
