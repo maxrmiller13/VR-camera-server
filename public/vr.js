@@ -13,11 +13,36 @@ let videoTexture;
 
 let positionBuffer;
 let uvBuffer;
+let indexBuffer;
+let indexCount = 0;
 
 let positionLocation;
 let uvLocation;
 
+let projectionMatrixLocation;
+let viewMatrixLocation;
+let modelMatrixLocation;
+let videoTextureLocation;
 
+const CURVE_SEGMENTS = 24;
+const CURVE_DEPTH_RATIO = 0.08;
+const PANEL_DISTANCE_METERS = 2.0;
+const SAFE_FOV_MARGIN = 0.94;
+
+let hasLoggedFirstFrame = false;
+let hasLoggedFirstVideoFrame = false;
+let hasLoggedVideoNotReady = false;
+
+function logGLErrors(stage) {
+    if (!gl) return;
+
+    let err = gl.getError();
+
+    while (err !== gl.NO_ERROR) {
+        console.error(`[GL ERROR] ${stage}: 0x${err.toString(16)}`);
+        err = gl.getError();
+    }
+}
 
 // -------------------------
 // XR SUPPORT CHECK
@@ -31,8 +56,6 @@ if (!navigator.xr) {
     });
 }
 
-
-
 // -------------------------
 // SHADERS
 // -------------------------
@@ -41,11 +64,15 @@ const vertexShaderSource = `
 attribute vec3 position;
 attribute vec2 uv;
 
+uniform mat4 projectionMatrix;
+uniform mat4 viewMatrix;
+uniform mat4 modelMatrix;
+
 varying vec2 vUV;
 
 void main() {
     vUV = uv;
-    gl_Position = vec4(position, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
 }
 `;
 
@@ -61,10 +88,7 @@ void main() {
 }
 `;
 
-
-
 function createShader(type, source) {
-
     const shader = gl.createShader(type);
 
     gl.shaderSource(shader, source);
@@ -77,26 +101,196 @@ function createShader(type, source) {
     return shader;
 }
 
+function getVideoAspectRatio() {
+    if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+        return video.videoWidth / video.videoHeight;
+    }
 
+    return 16 / 9;
+}
+
+function normalizeVec3(v) {
+    const len = Math.hypot(v[0], v[1], v[2]) || 1;
+    return [v[0] / len, v[1] / len, v[2] / len];
+}
+
+function quatRotateVec3(q, v) {
+    const x = q.x;
+    const y = q.y;
+    const z = q.z;
+    const w = q.w;
+
+    const vx = v[0];
+    const vy = v[1];
+    const vz = v[2];
+
+    // t = 2 * cross(q.xyz, v)
+    const tx = 2 * (y * vz - z * vy);
+    const ty = 2 * (z * vx - x * vz);
+    const tz = 2 * (x * vy - y * vx);
+
+    // v' = v + w * t + cross(q.xyz, t)
+    return [
+        vx + w * tx + (y * tz - z * ty),
+        vy + w * ty + (z * tx - x * tz),
+        vz + w * tz + (x * ty - y * tx)
+    ];
+}
+
+function createCurvedQuadMesh(segments, curveDepthRatio) {
+    const positions = [];
+    const uvs = [];
+    const indices = [];
+
+    for (let i = 0; i <= segments; i++) {
+        const t = i / segments;
+        const x = t * 2 - 1;
+        const z = -(x * x) * curveDepthRatio;
+
+        // bottom vertex
+        positions.push(x, -1, z);
+        uvs.push(t, 1);
+
+        // top vertex
+        positions.push(x, 1, z);
+        uvs.push(t, 0);
+    }
+
+    for (let i = 0; i < segments; i++) {
+        const base = i * 2;
+        indices.push(base, base + 1, base + 2);
+        indices.push(base + 1, base + 3, base + 2);
+    }
+
+    return {
+        positions: new Float32Array(positions),
+        uvs: new Float32Array(uvs),
+        indices: new Uint16Array(indices)
+    };
+}
+
+function getViewFrustumFitAtDistance(view, distanceMeters) {
+    // For projection matrix P, cot(fov/2) values are in P[0] (x) and P[5] (y).
+    const p = view.projectionMatrix;
+    const tanHalfFovX = 1 / Math.abs(p[0]);
+    const tanHalfFovY = 1 / Math.abs(p[5]);
+
+    return {
+        maxFullWidth: 2 * distanceMeters * tanHalfFovX,
+        maxFullHeight: 2 * distanceMeters * tanHalfFovY
+    };
+}
+
+function getPanelSizeForViews(views) {
+    const aspect = getVideoAspectRatio();
+
+    let maxWidth = Infinity;
+    let maxHeight = Infinity;
+
+    for (const view of views) {
+        const fit = getViewFrustumFitAtDistance(view, PANEL_DISTANCE_METERS);
+        maxWidth = Math.min(maxWidth, fit.maxFullWidth * SAFE_FOV_MARGIN);
+        maxHeight = Math.min(maxHeight, fit.maxFullHeight * SAFE_FOV_MARGIN);
+    }
+
+    let panelHeight = maxHeight;
+    let panelWidth = panelHeight * aspect;
+
+    if (panelWidth > maxWidth) {
+        panelWidth = maxWidth;
+        panelHeight = panelWidth / aspect;
+    }
+
+    return { panelWidth, panelHeight };
+}
+
+function getFacingPanelModelMatrix(viewerTransform, panelWidth, panelHeight) {
+    const orientation = viewerTransform.orientation;
+    const position = viewerTransform.position;
+
+    const forward = normalizeVec3(quatRotateVec3(orientation, [0, 0, -1]));
+
+    const centerX = position.x + forward[0] * PANEL_DISTANCE_METERS;
+    const centerY = position.y + forward[1] * PANEL_DISTANCE_METERS;
+    const centerZ = position.z + forward[2] * PANEL_DISTANCE_METERS;
+
+    const sx = panelWidth / 2;
+    const sy = panelHeight / 2;
+
+    const x = orientation.x;
+    const y = orientation.y;
+    const z = orientation.z;
+    const w = orientation.w;
+
+    const xx = x * x;
+    const yy = y * y;
+    const zz = z * z;
+    const xy = x * y;
+    const xz = x * z;
+    const yz = y * z;
+    const wx = w * x;
+    const wy = w * y;
+    const wz = w * z;
+
+    const r00 = 1 - 2 * (yy + zz);
+    const r01 = 2 * (xy + wz);
+    const r02 = 2 * (xz - wy);
+
+    const r10 = 2 * (xy - wz);
+    const r11 = 1 - 2 * (xx + zz);
+    const r12 = 2 * (yz + wx);
+
+    const r20 = 2 * (xz + wy);
+    const r21 = 2 * (yz - wx);
+    const r22 = 1 - 2 * (xx + yy);
+
+    // model = T * R * S (column-major)
+    return new Float32Array([
+        r00 * sx, r10 * sx, r20 * sx, 0,
+        r01 * sy, r11 * sy, r21 * sy, 0,
+        r02,      r12,      r22,      0,
+        centerX,  centerY,  centerZ,  1
+    ]);
+}
 
 // -------------------------
 // INITIALIZE WEBGL
 // -------------------------
 
 async function initGL() {
+    if (!canvas) {
+        throw new Error("Canvas element #xrCanvas was not found");
+    }
 
-    gl = canvas.getContext("webgl", { xrCompatible: true });
+    // Prefer WebGL1 for maximum XRWebGLLayer compatibility on mobile headsets.
+    gl =
+        canvas.getContext("webgl", { xrCompatible: true, alpha: false, antialias: false }) ||
+        canvas.getContext("experimental-webgl", { xrCompatible: true, alpha: false, antialias: false }) ||
+        canvas.getContext("webgl2", { xrCompatible: true, alpha: false, antialias: false });
 
-    await gl.makeXRCompatible();
+    if (!gl) {
+        throw new Error("Unable to create WebGL context. WebXR requires WebGL support.");
+    }
+
+    console.log("GL context created:", {
+        type: gl instanceof WebGL2RenderingContext ? "webgl2" : "webgl",
+        renderer: gl.getParameter(gl.RENDERER),
+        version: gl.getParameter(gl.VERSION)
+    });
+
+    if (typeof gl.makeXRCompatible === "function") {
+        await gl.makeXRCompatible();
+        console.log("makeXRCompatible() completed");
+    } else {
+        console.log("makeXRCompatible() not available on this context");
+    }
 
     const vertexShader = createShader(gl.VERTEX_SHADER, vertexShaderSource);
     const fragmentShader = createShader(gl.FRAGMENT_SHADER, fragmentShaderSource);
 
     program = gl.createProgram();
-
     gl.attachShader(program, vertexShader);
     gl.attachShader(program, fragmentShader);
-
     gl.linkProgram(program);
 
     if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
@@ -105,94 +299,74 @@ async function initGL() {
 
     gl.useProgram(program);
 
-
-    // QUAD VERTICES
-
-    const vertices = new Float32Array([
-        -1,-1,0,
-         1,-1,0,
-         1, 1,0,
-
-        -1,-1,0,
-         1, 1,0,
-        -1, 1,0
-    ]);
-
-    const uvs = new Float32Array([
-        0,1,
-        1,1,
-        1,0,
-
-        0,1,
-        1,0,
-        0,0
-    ]);
-
+    const mesh = createCurvedQuadMesh(CURVE_SEGMENTS, CURVE_DEPTH_RATIO);
+    indexCount = mesh.indices.length;
 
     // POSITION BUFFER
-
     positionBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, vertices, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.positions, gl.STATIC_DRAW);
 
     positionLocation = gl.getAttribLocation(program, "position");
-
     gl.enableVertexAttribArray(positionLocation);
-
-    gl.vertexAttribPointer(
-        positionLocation,
-        3,
-        gl.FLOAT,
-        false,
-        0,
-        0
-    );
-
+    gl.vertexAttribPointer(positionLocation, 3, gl.FLOAT, false, 0, 0);
 
     // UV BUFFER
-
     uvBuffer = gl.createBuffer();
     gl.bindBuffer(gl.ARRAY_BUFFER, uvBuffer);
-    gl.bufferData(gl.ARRAY_BUFFER, uvs, gl.STATIC_DRAW);
+    gl.bufferData(gl.ARRAY_BUFFER, mesh.uvs, gl.STATIC_DRAW);
 
     uvLocation = gl.getAttribLocation(program, "uv");
-
     gl.enableVertexAttribArray(uvLocation);
+    gl.vertexAttribPointer(uvLocation, 2, gl.FLOAT, false, 0, 0);
 
-    gl.vertexAttribPointer(
-        uvLocation,
-        2,
-        gl.FLOAT,
-        false,
-        0,
-        0
-    );
+    // INDEX BUFFER
+    indexBuffer = gl.createBuffer();
+    gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+    gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, mesh.indices, gl.STATIC_DRAW);
 
+    // UNIFORMS
+    projectionMatrixLocation = gl.getUniformLocation(program, "projectionMatrix");
+    viewMatrixLocation = gl.getUniformLocation(program, "viewMatrix");
+    modelMatrixLocation = gl.getUniformLocation(program, "modelMatrix");
+    videoTextureLocation = gl.getUniformLocation(program, "videoTexture");
 
     // VIDEO TEXTURE
-
     videoTexture = gl.createTexture();
-
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, videoTexture);
 
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
+    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+
+    gl.uniform1i(videoTextureLocation, 0);
+    gl.enable(gl.DEPTH_TEST);
+
+    console.log("initGL complete", { indexCount, curveSegments: CURVE_SEGMENTS });
+    logGLErrors("initGL complete");
 }
-
-
 
 // -------------------------
 // UPDATE VIDEO TEXTURE
 // -------------------------
 
 function updateVideoTexture() {
-
     if (video.readyState >= 2) {
+        if (!hasLoggedFirstVideoFrame) {
+            hasLoggedFirstVideoFrame = true;
+            console.log("First video frame ready:", {
+                readyState: video.readyState,
+                width: video.videoWidth,
+                height: video.videoHeight,
+                currentTime: video.currentTime
+            });
+        }
 
+        gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, videoTexture);
 
         gl.texImage2D(
@@ -203,102 +377,119 @@ function updateVideoTexture() {
             gl.UNSIGNED_BYTE,
             video
         );
+
+        logGLErrors("updateVideoTexture");
+    } else if (!hasLoggedVideoNotReady) {
+        hasLoggedVideoNotReady = true;
+        console.log("Video not ready for texture upload yet:", {
+            readyState: video.readyState,
+            paused: video.paused,
+            muted: video.muted
+        });
     }
-
 }
-
-
 
 // -------------------------
 // DRAW
 // -------------------------
 
-function draw() {
+function draw(view, modelMatrix) {
+    gl.uniformMatrix4fv(projectionMatrixLocation, false, view.projectionMatrix);
+    gl.uniformMatrix4fv(viewMatrixLocation, false, view.transform.inverse.matrix);
+    gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
 
-    updateVideoTexture();
+    gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_SHORT, 0);
 
-    gl.clearColor(0,0,0,1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-
-    gl.drawArrays(gl.TRIANGLES, 0, 6);
+    logGLErrors(`draw eye=${view.eye}`);
 }
-
-
 
 // -------------------------
 // XR FRAME LOOP
 // -------------------------
 
 function onXRFrame(time, frame) {
-
     const pose = frame.getViewerPose(refSpace);
-    const layer = session.renderState.baseLayer;
-
-    gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
 
     if (pose) {
+        const layer = session.renderState.baseLayer;
+
+        if (!hasLoggedFirstFrame) {
+            hasLoggedFirstFrame = true;
+            console.log("First XR frame:", {
+                viewCount: pose.views.length,
+                framebufferWidth: layer.framebufferWidth,
+                framebufferHeight: layer.framebufferHeight
+            });
+        }
+
+        // Upload video texture before binding XR framebuffer to avoid driver quirks.
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        updateVideoTexture();
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
+
+        gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        const { panelWidth, panelHeight } = getPanelSizeForViews(pose.views);
+        const modelMatrix = getFacingPanelModelMatrix(pose.transform, panelWidth, panelHeight);
 
         for (const view of pose.views) {
-
             const viewport = layer.getViewport(view);
-
-            gl.viewport(
-                viewport.x,
-                viewport.y,
-                viewport.width,
-                viewport.height
-            );
-
-            draw();
+            gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
+            draw(view, modelMatrix);
         }
+    } else {
+        console.warn("No viewer pose for XR frame");
     }
 
     session.requestAnimationFrame(onXRFrame);
 }
-
-
 
 // -------------------------
 // START VR
 // -------------------------
 
 async function startVR() {
-
     session = await navigator.xr.requestSession("immersive-vr", {
         requiredFeatures: ["local"]
     });
 
-    session.updateRenderState({
-        baseLayer: new XRWebGLLayer(session, gl)
+    console.log("XR session acquired");
+
+    session.addEventListener("end", () => {
+        console.log("XR session ended");
     });
 
-    refSpace = await session.requestReferenceSpace("local");
+    session.updateRenderState({
+        baseLayer: new XRWebGLLayer(session, gl, {
+            antialias: false,
+            alpha: false,
+            depth: true,
+            stencil: false,
+            framebufferScaleFactor: 1.0
+        })
+    });
 
+    logGLErrors("after session.updateRenderState");
+
+    refSpace = await session.requestReferenceSpace("local");
     session.requestAnimationFrame(onXRFrame);
 
     console.log("VR session started");
 }
-
-
 
 // -------------------------
 // BUTTON
 // -------------------------
 
 document.getElementById("startVR").onclick = async () => {
-
     try {
-
         console.log("Start VR pressed");
-
         await initGL();
-
         await startVR();
-
     } catch (err) {
-
         console.error("Failed to start VR:", err);
-
     }
-
 };
