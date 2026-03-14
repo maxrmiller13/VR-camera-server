@@ -85,9 +85,23 @@ function createShader(type, source) {
 
 async function initGL() {
 
-    gl = canvas.getContext("webgl", { xrCompatible: true });
+    if (!canvas) {
+        throw new Error("Canvas element #xrCanvas was not found");
+    }
 
-    await gl.makeXRCompatible();
+    gl =
+        canvas.getContext("webgl2", { xrCompatible: true, alpha: false }) ||
+        canvas.getContext("webgl", { xrCompatible: true, alpha: false }) ||
+        canvas.getContext("experimental-webgl", { xrCompatible: true, alpha: false });
+
+    if (!gl) {
+        throw new Error("Unable to create WebGL context. WebXR requires WebGL support.");
+    }
+
+    // Some runtimes expose makeXRCompatible on WebGL contexts and some do not.
+    if (typeof gl.makeXRCompatible === "function") {
+        await gl.makeXRCompatible();
+    }
 
     const vertexShader = createShader(gl.VERTEX_SHADER, vertexShaderSource);
     const fragmentShader = createShader(gl.FRAGMENT_SHADER, fragmentShaderSource);
@@ -215,11 +229,6 @@ function updateVideoTexture() {
 
 function draw() {
 
-    updateVideoTexture();
-
-    gl.clearColor(0,0,0,1);
-    gl.clear(gl.COLOR_BUFFER_BIT);
-
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
 
@@ -237,6 +246,14 @@ function onXRFrame(time, frame) {
     gl.bindFramebuffer(gl.FRAMEBUFFER, layer.framebuffer);
 
     if (pose) {
+
+        updateVideoTexture();
+
+        // Clear once for the full XR framebuffer.
+        // Clearing inside the per-eye loop wipes the previously rendered eye.
+        gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
+        gl.clearColor(0,0,0,1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
 
         for (const view of pose.views) {
 
