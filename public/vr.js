@@ -17,6 +17,11 @@ let uvBuffer;
 let positionLocation;
 let uvLocation;
 
+let projectionMatrixLocation;
+let viewMatrixLocation;
+let modelMatrixLocation;
+let videoTextureLocation;
+
 
 
 // -------------------------
@@ -41,11 +46,15 @@ const vertexShaderSource = `
 attribute vec3 position;
 attribute vec2 uv;
 
+uniform mat4 projectionMatrix;
+uniform mat4 viewMatrix;
+uniform mat4 modelMatrix;
+
 varying vec2 vUV;
 
 void main() {
     vUV = uv;
-    gl_Position = vec4(position, 1.0);
+    gl_Position = projectionMatrix * viewMatrix * modelMatrix * vec4(position, 1.0);
 }
 `;
 
@@ -75,6 +84,31 @@ function createShader(type, source) {
     }
 
     return shader;
+}
+
+function getVideoAspectRatio() {
+    if (video && video.videoWidth > 0 && video.videoHeight > 0) {
+        return video.videoWidth / video.videoHeight;
+    }
+
+    return 16 / 9;
+}
+
+function getVideoQuadModelMatrix() {
+    const distanceMeters = 2.0;
+    const heightMeters = 1.0;
+    const widthMeters = heightMeters * getVideoAspectRatio();
+
+    const sx = widthMeters / 2;
+    const sy = heightMeters / 2;
+
+    // Column-major transform: translate in front of user, then scale unit quad.
+    return new Float32Array([
+        sx, 0, 0, 0,
+        0, sy, 0, 0,
+        0, 0, 1, 0,
+        0, 0, -distanceMeters, 1
+    ]);
 }
 
 
@@ -129,23 +163,23 @@ async function initGL() {
     // QUAD VERTICES
 
     const vertices = new Float32Array([
-        -1,-1,0,
-         1,-1,0,
-         1, 1,0,
+        -1, -1, 0,
+         1, -1, 0,
+         1,  1, 0,
 
-        -1,-1,0,
-         1, 1,0,
-        -1, 1,0
+        -1, -1, 0,
+         1,  1, 0,
+        -1,  1, 0
     ]);
 
     const uvs = new Float32Array([
-        0,1,
-        1,1,
-        1,0,
+        0, 1,
+        1, 1,
+        1, 0,
 
-        0,1,
-        1,0,
-        0,0
+        0, 1,
+        1, 0,
+        0, 0
     ]);
 
 
@@ -189,10 +223,19 @@ async function initGL() {
     );
 
 
+    // UNIFORMS
+
+    projectionMatrixLocation = gl.getUniformLocation(program, "projectionMatrix");
+    viewMatrixLocation = gl.getUniformLocation(program, "viewMatrix");
+    modelMatrixLocation = gl.getUniformLocation(program, "modelMatrix");
+    videoTextureLocation = gl.getUniformLocation(program, "videoTexture");
+
+
     // VIDEO TEXTURE
 
     videoTexture = gl.createTexture();
 
+    gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, videoTexture);
 
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
@@ -200,6 +243,10 @@ async function initGL() {
 
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+
+    gl.uniform1i(videoTextureLocation, 0);
+
+    gl.enable(gl.DEPTH_TEST);
 
 }
 
@@ -213,13 +260,14 @@ function updateVideoTexture() {
 
     if (video.readyState >= 2) {
 
+        gl.activeTexture(gl.TEXTURE0);
         gl.bindTexture(gl.TEXTURE_2D, videoTexture);
 
         gl.texImage2D(
             gl.TEXTURE_2D,
             0,
-            gl.RGB,
-            gl.RGB,
+            gl.RGBA,
+            gl.RGBA,
             gl.UNSIGNED_BYTE,
             video
         );
@@ -233,7 +281,7 @@ function updateVideoTexture() {
 // DRAW
 // -------------------------
 
-function draw() {
+function draw(view) {
 
     gl.drawArrays(gl.TRIANGLES, 0, 6);
 }
@@ -272,7 +320,7 @@ function onXRFrame(time, frame) {
                 viewport.height
             );
 
-            draw();
+            draw(view);
         }
     }
 
