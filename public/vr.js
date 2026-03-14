@@ -133,6 +133,12 @@ function getVideoQuadModelMatrix() {
 // -------------------------
 
 async function initGL() {
+    if (!canvas) {
+        throw new Error("xrCanvas not found in DOM");
+    }
+
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
 
     if (!canvas) {
         throw new Error("Canvas element #xrCanvas was not found");
@@ -364,6 +370,14 @@ function onXRFrame(time, frame) {
         gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
         gl.clearColor(0, 0, 0, 1);
         gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        updateVideoTexture();
+
+        // Clear once for the full XR framebuffer.
+        // Clearing inside the per-eye loop wipes the previously rendered eye.
+        gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
+        gl.clearColor(0,0,0,1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
 
         for (const view of pose.views) {
 
