@@ -15,6 +15,7 @@ let positionBuffer;
 let uvBuffer;
 let indexBuffer;
 let indexCount = 0;
+let panelMesh;
 
 let positionLocation;
 let uvLocation;
@@ -466,5 +467,4 @@ document.getElementById("startVR").onclick = async () => {
     } catch (err) {
         console.error("Failed to start VR:", err);
     }
-
 };
