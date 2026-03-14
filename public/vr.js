@@ -340,7 +340,13 @@ async function startVR() {
     });
 
     session.updateRenderState({
-        baseLayer: new XRWebGLLayer(session, gl)
+        baseLayer: new XRWebGLLayer(session, gl, {
+            antialias: false,
+            alpha: false,
+            depth: true,
+            stencil: false,
+            framebufferScaleFactor: 1.0
+        })
     });
 
     refSpace = await session.requestReferenceSpace("local");
