@@ -24,6 +24,22 @@ let viewMatrixLocation;
 let modelMatrixLocation;
 let videoTextureLocation;
 
+let hasLoggedFirstFrame = false;
+let hasLoggedFirstVideoFrame = false;
+let hasLoggedVideoNotReady = false;
+
+function logGLErrors(stage) {
+    if (!gl) return;
+
+    let err = gl.getError();
+
+    while (err !== gl.NO_ERROR) {
+        console.error(`[GL ERROR] ${stage}: 0x${err.toString(16)}`);
+        err = gl.getError();
+    }
+}
+
+
 const CURVE_SEGMENTS = 24;
 const CURVE_DEPTH_RATIO = 0.08;
 const PANEL_DISTANCE_METERS = 2.0;
@@ -109,100 +125,23 @@ function getVideoAspectRatio() {
     return 16 / 9;
 }
 
-function normalizeVec3(v) {
-    const len = Math.hypot(v[0], v[1], v[2]) || 1;
-    return [v[0] / len, v[1] / len, v[2] / len];
+function getVideoQuadModelMatrix() {
+    const distanceMeters = 2.0;
+    const heightMeters = 1.0;
+    const widthMeters = heightMeters * getVideoAspectRatio();
+
+    const sx = widthMeters / 2;
+    const sy = heightMeters / 2;
+
+    // Column-major transform: translate in front of user, then scale unit quad.
+    return new Float32Array([
+        sx, 0, 0, 0,
+        0, sy, 0, 0,
+        0, 0, 1, 0,
+        0, 0, -distanceMeters, 1
+    ]);
 }
 
-function quatRotateVec3(q, v) {
-    const x = q.x;
-    const y = q.y;
-    const z = q.z;
-    const w = q.w;
-
-    const vx = v[0];
-    const vy = v[1];
-    const vz = v[2];
-
-    // t = 2 * cross(q.xyz, v)
-    const tx = 2 * (y * vz - z * vy);
-    const ty = 2 * (z * vx - x * vz);
-    const tz = 2 * (x * vy - y * vx);
-
-    // v' = v + w * t + cross(q.xyz, t)
-    return [
-        vx + w * tx + (y * tz - z * ty),
-        vy + w * ty + (z * tx - x * tz),
-        vz + w * tz + (x * ty - y * tx)
-    ];
-}
-
-function createCurvedQuadMesh(segments, curveDepthRatio) {
-    const positions = [];
-    const uvs = [];
-    const indices = [];
-
-    for (let i = 0; i <= segments; i++) {
-        const t = i / segments;
-        const x = t * 2 - 1;
-        const z = -(x * x) * curveDepthRatio;
-
-        // bottom vertex
-        positions.push(x, -1, z);
-        uvs.push(t, 1);
-
-        // top vertex
-        positions.push(x, 1, z);
-        uvs.push(t, 0);
-    }
-
-    for (let i = 0; i < segments; i++) {
-        const base = i * 2;
-        indices.push(base, base + 1, base + 2);
-        indices.push(base + 1, base + 3, base + 2);
-    }
-
-    return {
-        positions: new Float32Array(positions),
-        uvs: new Float32Array(uvs),
-        indices: new Uint16Array(indices)
-    };
-}
-
-function getViewFrustumFitAtDistance(view, distanceMeters) {
-    // For projection matrix P, cot(fov/2) values are in P[0] (x) and P[5] (y).
-    const p = view.projectionMatrix;
-    const tanHalfFovX = 1 / Math.abs(p[0]);
-    const tanHalfFovY = 1 / Math.abs(p[5]);
-
-    return {
-        maxFullWidth: 2 * distanceMeters * tanHalfFovX,
-        maxFullHeight: 2 * distanceMeters * tanHalfFovY
-    };
-}
-
-function getPanelSizeForViews(views) {
-    const aspect = getVideoAspectRatio();
-
-    let maxWidth = Infinity;
-    let maxHeight = Infinity;
-
-    for (const view of views) {
-        const fit = getViewFrustumFitAtDistance(view, PANEL_DISTANCE_METERS);
-        maxWidth = Math.min(maxWidth, fit.maxFullWidth * SAFE_FOV_MARGIN);
-        maxHeight = Math.min(maxHeight, fit.maxFullHeight * SAFE_FOV_MARGIN);
-    }
-
-    let panelHeight = maxHeight;
-    let panelWidth = panelHeight * aspect;
-
-    if (panelWidth > maxWidth) {
-        panelWidth = maxWidth;
-        panelHeight = panelWidth / aspect;
-    }
-
-    return { panelWidth, panelHeight };
-}
 
 function getFacingPanelModelMatrix(viewerTransform, panelWidth, panelHeight) {
     const orientation = viewerTransform.orientation;
@@ -259,10 +198,18 @@ function getFacingPanelModelMatrix(viewerTransform, panelWidth, panelHeight) {
 
 async function initGL() {
     if (!canvas) {
+        throw new Error("xrCanvas not found in DOM");
+    }
+
+    canvas.width  = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    if (!canvas) {
         throw new Error("Canvas element #xrCanvas was not found");
     }
 
     // Prefer WebGL1 for maximum XRWebGLLayer compatibility on mobile headsets.
+    // Some runtimes expose WebGL2 but fail internally when binding XR swapchains.
     gl =
         canvas.getContext("webgl", { xrCompatible: true, alpha: false, antialias: false }) ||
         canvas.getContext("experimental-webgl", { xrCompatible: true, alpha: false, antialias: false }) ||
@@ -278,6 +225,7 @@ async function initGL() {
         version: gl.getParameter(gl.VERSION)
     });
 
+    // Some runtimes expose makeXRCompatible on WebGL contexts and some do not.
     if (typeof gl.makeXRCompatible === "function") {
         await gl.makeXRCompatible();
         console.log("makeXRCompatible() completed");
@@ -299,8 +247,29 @@ async function initGL() {
 
     gl.useProgram(program);
 
-    const mesh = createCurvedQuadMesh(CURVE_SEGMENTS, CURVE_DEPTH_RATIO);
-    indexCount = mesh.indices.length;
+
+    // QUAD VERTICES
+
+    const vertices = new Float32Array([
+        -1, -1, 0,
+         1, -1, 0,
+         1,  1, 0,
+
+        -1, -1, 0,
+         1,  1, 0,
+        -1,  1, 0
+    ]);
+
+    const uvs = new Float32Array([
+        0, 1,
+        1, 1,
+        1, 0,
+
+        0, 1,
+        1, 0,
+        0, 0
+    ]);
+
 
     // POSITION BUFFER
     positionBuffer = gl.createBuffer();
@@ -331,8 +300,17 @@ async function initGL() {
     modelMatrixLocation = gl.getUniformLocation(program, "modelMatrix");
     videoTextureLocation = gl.getUniformLocation(program, "videoTexture");
 
+    // UNIFORMS
+
+    projectionMatrixLocation = gl.getUniformLocation(program, "projectionMatrix");
+    viewMatrixLocation = gl.getUniformLocation(program, "viewMatrix");
+    modelMatrixLocation = gl.getUniformLocation(program, "modelMatrix");
+    videoTextureLocation = gl.getUniformLocation(program, "videoTexture");
+
+
     // VIDEO TEXTURE
     videoTexture = gl.createTexture();
+
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, videoTexture);
 
@@ -341,7 +319,14 @@ async function initGL() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
-    gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+    gl.uniform1i(videoTextureLocation, 0);
+
+    gl.enable(gl.DEPTH_TEST);
+
+    console.log("initGL complete");
+    logGLErrors("initGL complete");
+
+}
 
     gl.uniform1i(videoTextureLocation, 0);
     gl.enable(gl.DEPTH_TEST);
@@ -372,11 +357,23 @@ function updateVideoTexture() {
         gl.texImage2D(
             gl.TEXTURE_2D,
             0,
-            gl.RGB,
-            gl.RGB,
+            gl.RGBA,
+            gl.RGBA,
             gl.UNSIGNED_BYTE,
             video
         );
+
+        logGLErrors("updateVideoTexture");
+    } else {
+        if (!hasLoggedVideoNotReady) {
+            hasLoggedVideoNotReady = true;
+            console.log("Video not ready for texture upload yet:", {
+                readyState: video.readyState,
+                paused: video.paused,
+                muted: video.muted
+            });
+        }
+    }
 
         logGLErrors("updateVideoTexture");
     } else if (!hasLoggedVideoNotReady) {
@@ -393,12 +390,13 @@ function updateVideoTexture() {
 // DRAW
 // -------------------------
 
-function draw(view, modelMatrix) {
+function draw(view) {
+
     gl.uniformMatrix4fv(projectionMatrixLocation, false, view.projectionMatrix);
     gl.uniformMatrix4fv(viewMatrixLocation, false, view.transform.inverse.matrix);
-    gl.uniformMatrix4fv(modelMatrixLocation, false, modelMatrix);
+    gl.uniformMatrix4fv(modelMatrixLocation, false, getVideoQuadModelMatrix());
 
-    gl.drawElements(gl.TRIANGLES, indexCount, gl.UNSIGNED_SHORT, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 6);
 
     logGLErrors(`draw eye=${view.eye}`);
 }
@@ -411,8 +409,6 @@ function onXRFrame(time, frame) {
     const pose = frame.getViewerPose(refSpace);
 
     if (pose) {
-        const layer = session.renderState.baseLayer;
-
         if (!hasLoggedFirstFrame) {
             hasLoggedFirstFrame = true;
             console.log("First XR frame:", {
@@ -421,6 +417,21 @@ function onXRFrame(time, frame) {
                 framebufferHeight: layer.framebufferHeight
             });
         }
+
+        updateVideoTexture();
+
+        // Clear once for the full XR framebuffer.
+        gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
+        gl.clearColor(0, 0, 0, 1);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+        updateVideoTexture();
+
+        // Clear once for the full XR framebuffer.
+        // Clearing inside the per-eye loop wipes the previously rendered eye.
+        gl.viewport(0, 0, layer.framebufferWidth, layer.framebufferHeight);
+        gl.clearColor(0,0,0,1);
+        gl.clear(gl.COLOR_BUFFER_BIT);
 
         // Upload video texture before binding XR framebuffer to avoid driver quirks.
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
@@ -435,10 +446,7 @@ function onXRFrame(time, frame) {
         const { panelWidth, panelHeight } = getPanelSizeForViews(pose.views);
         const modelMatrix = getFacingPanelModelMatrix(pose.transform, panelWidth, panelHeight);
 
-        for (const view of pose.views) {
-            const viewport = layer.getViewport(view);
-            gl.viewport(viewport.x, viewport.y, viewport.width, viewport.height);
-            draw(view, modelMatrix);
+            draw(view);
         }
     } else {
         console.warn("No viewer pose for XR frame");
@@ -475,6 +483,8 @@ async function startVR() {
     logGLErrors("after session.updateRenderState");
 
     refSpace = await session.requestReferenceSpace("local");
+
+    refSpace = await session.requestReferenceSpace("local");
     session.requestAnimationFrame(onXRFrame);
 
     console.log("VR session started");
@@ -492,4 +502,5 @@ document.getElementById("startVR").onclick = async () => {
     } catch (err) {
         console.error("Failed to start VR:", err);
     }
+
 };
