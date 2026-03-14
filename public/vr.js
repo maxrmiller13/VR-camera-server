@@ -24,22 +24,6 @@ let viewMatrixLocation;
 let modelMatrixLocation;
 let videoTextureLocation;
 
-let hasLoggedFirstFrame = false;
-let hasLoggedFirstVideoFrame = false;
-let hasLoggedVideoNotReady = false;
-
-function logGLErrors(stage) {
-    if (!gl) return;
-
-    let err = gl.getError();
-
-    while (err !== gl.NO_ERROR) {
-        console.error(`[GL ERROR] ${stage}: 0x${err.toString(16)}`);
-        err = gl.getError();
-    }
-}
-
-
 const CURVE_SEGMENTS = 24;
 const CURVE_DEPTH_RATIO = 0.08;
 const PANEL_DISTANCE_METERS = 2.0;
@@ -320,15 +304,6 @@ async function initGL() {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
 
     gl.uniform1i(videoTextureLocation, 0);
-
-    gl.enable(gl.DEPTH_TEST);
-
-    console.log("initGL complete");
-    logGLErrors("initGL complete");
-
-}
-
-    gl.uniform1i(videoTextureLocation, 0);
     gl.enable(gl.DEPTH_TEST);
 
     console.log("initGL complete", { indexCount, curveSegments: CURVE_SEGMENTS });
@@ -373,16 +348,6 @@ function updateVideoTexture() {
                 muted: video.muted
             });
         }
-    }
-
-        logGLErrors("updateVideoTexture");
-    } else if (!hasLoggedVideoNotReady) {
-        hasLoggedVideoNotReady = true;
-        console.log("Video not ready for texture upload yet:", {
-            readyState: video.readyState,
-            paused: video.paused,
-            muted: video.muted
-        });
     }
 }
 
@@ -447,7 +412,6 @@ function onXRFrame(time, frame) {
         const modelMatrix = getFacingPanelModelMatrix(pose.transform, panelWidth, panelHeight);
 
             draw(view);
-        }
     } else {
         console.warn("No viewer pose for XR frame");
     }
