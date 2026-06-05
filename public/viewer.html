@@ -23,6 +23,23 @@
 
         <script src="/socket.io/socket.io.js"></script>
         <script type="module" src="/viewer_connection.js"></script>
-        <script src="vr.js"></script>
+        <script type="module">
+            import { WebXRVideoPlayer }
+                from "./vr.js";
+
+            const video = document.getElementById("video");
+
+            document
+                .getElementById("startVR")
+                .addEventListener("click", async () => {
+
+                    await video.play();
+
+                    const player =
+                        new WebXRVideoPlayer(video);
+
+                    await player.start();
+                });
+            </script>
     </body>
 </html>
