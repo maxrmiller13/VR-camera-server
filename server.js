@@ -33,10 +33,21 @@ io.on("connection", socket => {
         }
     });
 
-    // Forward disconnect to target id with message
+    socket.on("offer", (id, description) => {
+        io.to(id).emit("offer", socket.id, description);
+    });
+
+    socket.on("answer", (id, description) => {
+        io.to(id).emit("answer", socket.id, description);
+    });
+
+    socket.on("candidate", (id, candidate) => {
+        io.to(id).emit("candidate", socket.id, candidate);
+    });
+
     socket.on("disconnect", () => {
         socket.broadcast.emit("disconnectPeer", socket.id);
-        console.log("client disconnected")
+        console.log("client disconnected");
     });
 });
 

@@ -14,6 +14,18 @@ socket.on("offer", (id, description) => {
         iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
     });
 
+    pc.ondatachannel = (event) => {
+        const channel = event.channel;
+
+        channel.onopen = () => {
+            console.log("Data channel open");
+        };
+
+        channel.onmessage = (msg) => {
+            console.log("Message from Pi:", msg.data);
+        };
+    };
+
     pc.ontrack = event => {
         video.srcObject = event.streams[0];
         console.log("track received");
