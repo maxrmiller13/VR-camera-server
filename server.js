@@ -16,39 +16,21 @@ app.use(express.static("public"));
 
 let cameraSender;
 
-// Connect a client
 io.on("connection", socket => {
 
-    // assign broadcaster (cam) it's id
+    console.log("Connected:", socket.id);
+
     socket.on("cameraSender", () => {
         cameraSender = socket.id;
         console.log("Camera sender connected");
     });
 
-    // when viewer connects, pass it's ID to broadcaster
     socket.on("viewer", () => {
+        console.log("Viewer connected");
+
         if (cameraSender) {
             io.to(cameraSender).emit("viewer", socket.id);
-            console.log("Viewer connected");
         }
-    });
-
-    // Forward offer to target id with message
-    socket.on("offer", (id, message) => {
-        io.to(id).emit("offer", socket.id, message);
-        console.log("Offer sent")
-    });
-
-    // Forward answer to target id with message
-    socket.on("answer", (id, message) => {
-        io.to(id).emit("answer", socket.id, message);
-        console.log("Answer sent")
-    });
-
-    // Forward candidate to target id with message
-    socket.on("candidate", (id, message) => {
-        io.to(id).emit("candidate", socket.id, message);
-        console.log("candidate sent")
     });
 
     // Forward disconnect to target id with message
@@ -56,7 +38,6 @@ io.on("connection", socket => {
         socket.broadcast.emit("disconnectPeer", socket.id);
         console.log("client disconnected")
     });
-
 });
 
 server.listen(3000, () => {

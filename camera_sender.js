@@ -18,3 +18,7 @@ socket.on("connect_error", err => {
 socket.on("disconnect", reason => {
     console.log("DISCONNECTED", reason);
 });
+
+socket.on("viewer", id => {
+    console.log("Viewer connected:", id);
+});
