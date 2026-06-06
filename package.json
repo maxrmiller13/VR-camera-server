@@ -2,6 +2,7 @@
   "dependencies": {
     "express": "^4.22.1",
     "node-datachannel": "^0.32.3",
-    "socket.io": "^4.8.3"
+    "socket.io": "^4.8.3",
+    "socket.io-client": "^4.8.3"
   }
 }

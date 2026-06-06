@@ -1,13 +1,20 @@
 const io = require("socket.io-client");
 
-const socket = io("http://localhost:3000");
+const socket = io("https://localhost:3000", {
+    rejectUnauthorized: false,
+    transports: ["websocket"]
+});
 
 socket.on("connect", () => {
-    console.log("Connected:", socket.id);
-
+    console.log("CONNECTED", socket.id);
     socket.emit("cameraSender");
 });
 
-socket.on("viewer", id => {
-    console.log("Viewer connected:", id);
+socket.on("connect_error", err => {
+    console.log("CONNECT ERROR");
+    console.log(err.message);
+});
+
+socket.on("disconnect", reason => {
+    console.log("DISCONNECTED", reason);
 });
