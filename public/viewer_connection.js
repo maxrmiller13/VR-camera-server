@@ -37,6 +37,17 @@ socket.on("offer", (id, description) => {
         }
     };
 
+    console.log("Data channel created");
+    console.log("Calling setLocalDescription");
+
+    pc.onGatheringStateChange(state => {
+        console.log("GATHERING:", state);
+    });
+
+    pc.onSignalingStateChange(state => {
+        console.log("SIGNALING:", state);
+    });
+
     pc.setRemoteDescription(description)
     .then(() => pc.createAnswer())
     .then(sdp => pc.setLocalDescription(sdp))
@@ -46,6 +57,16 @@ socket.on("offer", (id, description) => {
 
 });
 
-socket.on("candidate", (id, candidate) => {
-    pc.addIceCandidate(new RTCIceCandidate(candidate));
+socket.on("candidate", async (id, candidate) => {
+
+    console.log("CANDIDATE RECEIVED");
+
+    if (!pc) {
+        console.log("No peer connection yet");
+        return;
+    }
+
+    await pc.addIceCandidate(
+        new RTCIceCandidate(candidate)
+    );
 });
