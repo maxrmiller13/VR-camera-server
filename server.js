@@ -14,22 +14,22 @@ const io = new Server(server);
 
 app.use(express.static("public"));
 
-let broadcaster;
+let cameraSender;
 
 // Connect a client
 io.on("connection", socket => {
 
     // assign broadcaster (cam) it's id
-    socket.on("broadcaster", () => {
-        broadcaster = socket.id;
-        console.log("Broadcaster connected")
+    socket.on("cameraSender", () => {
+        cameraSender = socket.id;
+        console.log("Camera sender connected");
     });
 
     // when viewer connects, pass it's ID to broadcaster
     socket.on("viewer", () => {
-        if (broadcaster) {
-            io.to(broadcaster).emit("viewer", socket.id);
-            console.log("Viewer connected")
+        if (cameraSender) {
+            io.to(cameraSender).emit("viewer", socket.id);
+            console.log("Viewer connected");
         }
     });
 
