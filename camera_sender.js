@@ -10,6 +10,8 @@ const VIDEO_WIDTH = Number(process.env.VIDEO_WIDTH || 1280);
 const VIDEO_HEIGHT = Number(process.env.VIDEO_HEIGHT || 720);
 const VIDEO_FPS = Number(process.env.VIDEO_FPS || 30);
 const VIDEO_BITRATE_KBPS = Number(process.env.VIDEO_BITRATE_KBPS || 1000);
+const CAMERA_FORMAT = process.env.CAMERA_FORMAT || "NV12";
+const ENCODER_INPUT_FORMAT = process.env.ENCODER_INPUT_FORMAT || "I420";
 const RTP_PAYLOAD_TYPE = Number(process.env.RTP_PAYLOAD_TYPE || 96);
 const GST_RESTART_DELAY_MS = 2000;
 const STATS_INTERVAL_MS = 5000;
@@ -51,7 +53,7 @@ process.on("unhandledRejection", err => {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-log("info", "Config", `signal=${SIGNAL_URL}`, `rtp=${RTP_HOST}:${RTP_PORT}`, `video=${VIDEO_WIDTH}x${VIDEO_HEIGHT}@${VIDEO_FPS}`, `bitrate=${VIDEO_BITRATE_KBPS}kbps`, `pt=${RTP_PAYLOAD_TYPE}`);
+log("info", "Config", `signal=${SIGNAL_URL}`, `rtp=${RTP_HOST}:${RTP_PORT}`, `video=${VIDEO_WIDTH}x${VIDEO_HEIGHT}@${VIDEO_FPS}`, `cameraFormat=${CAMERA_FORMAT}`, `encoderInput=${ENCODER_INPUT_FORMAT}`, `bitrate=${VIDEO_BITRATE_KBPS}kbps`, `pt=${RTP_PAYLOAD_TYPE}`);
 
 try {
     dc.initLogger("Warn", (level, message) => log("warn", "node-datachannel", `[${level}] ${message}`));
@@ -71,15 +73,24 @@ try {
 function buildGStreamerPipeline() {
     return [
         "libcamerasrc",
-        "!", `video/x-raw,width=${VIDEO_WIDTH},height=${VIDEO_HEIGHT},framerate=${VIDEO_FPS}/1`,
+        // Do not force width/height directly on libcamerasrc. Some Pi cameras
+        // validate 1280x720 to a native sensor mode (for example 1536x864), and
+        // keeping the requested size in the source caps can then fail with
+        // reason not-negotiated (-4). Force a processed YUV format at the
+        // camera boundary, then scale/convert downstream for the encoder.
+        "!", `video/x-raw,format=${CAMERA_FORMAT},framerate=${VIDEO_FPS}/1`,
+        "!", "queue", "leaky=downstream", "max-size-buffers=2",
+        "!", "videoscale",
         "!", "videoconvert",
+        "!", `video/x-raw,format=${ENCODER_INPUT_FORMAT},width=${VIDEO_WIDTH},height=${VIDEO_HEIGHT},framerate=${VIDEO_FPS}/1`,
         "!", "x264enc",
               "tune=zerolatency",
               `bitrate=${VIDEO_BITRATE_KBPS}`,
               "speed-preset=superfast",
               `key-int-max=${VIDEO_FPS}`,
-        "!", "video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au",
+              "byte-stream=true",
         "!", "h264parse", "config-interval=1",
+        "!", "video/x-h264,profile=constrained-baseline,stream-format=byte-stream,alignment=au",
         "!", "rtph264pay", "config-interval=1", `pt=${RTP_PAYLOAD_TYPE}`,
         "!", "udpsink", `host=${RTP_HOST}`, `port=${RTP_PORT}`, "sync=false", "async=false"
     ];
