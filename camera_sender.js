@@ -10,6 +10,8 @@ const VIDEO_WIDTH = Number(process.env.VIDEO_WIDTH || 1280);
 const VIDEO_HEIGHT = Number(process.env.VIDEO_HEIGHT || 720);
 const VIDEO_FPS = Number(process.env.VIDEO_FPS || 30);
 const VIDEO_BITRATE_KBPS = Number(process.env.VIDEO_BITRATE_KBPS || 1000);
+const CAMERA_BACKEND = process.env.CAMERA_BACKEND || "rpicam-vid";
+const CAMERA_COMMAND = process.env.CAMERA_COMMAND || CAMERA_BACKEND;
 const CAMERA_FORMAT = process.env.CAMERA_FORMAT || "NV12";
 const ENCODER_INPUT_FORMAT = process.env.ENCODER_INPUT_FORMAT || "I420";
 const RTP_PAYLOAD_TYPE = Number(process.env.RTP_PAYLOAD_TYPE || 96);
@@ -19,6 +21,8 @@ const STATS_INTERVAL_MS = 5000;
 const peers = {};       // socketId -> PeerConnection
 const videoTracks = {}; // socketId -> Track
 let gstProcess = null;
+let cameraProcess = null;
+let restartTimer = null;
 let stopping = false;
 let packetCount = 0;
 let byteCount = 0;
@@ -53,7 +57,7 @@ process.on("unhandledRejection", err => {
 process.on("SIGINT", shutdown);
 process.on("SIGTERM", shutdown);
 
-log("info", "Config", `signal=${SIGNAL_URL}`, `rtp=${RTP_HOST}:${RTP_PORT}`, `video=${VIDEO_WIDTH}x${VIDEO_HEIGHT}@${VIDEO_FPS}`, `cameraFormat=${CAMERA_FORMAT}`, `encoderInput=${ENCODER_INPUT_FORMAT}`, `bitrate=${VIDEO_BITRATE_KBPS}kbps`, `pt=${RTP_PAYLOAD_TYPE}`);
+log("info", "Config", `signal=${SIGNAL_URL}`, `rtp=${RTP_HOST}:${RTP_PORT}`, `video=${VIDEO_WIDTH}x${VIDEO_HEIGHT}@${VIDEO_FPS}`, `backend=${CAMERA_BACKEND}`, `cameraCommand=${CAMERA_COMMAND}`, `cameraFormat=${CAMERA_FORMAT}`, `encoderInput=${ENCODER_INPUT_FORMAT}`, `bitrate=${VIDEO_BITRATE_KBPS}kbps`, `pt=${RTP_PAYLOAD_TYPE}`);
 
 try {
     dc.initLogger("Warn", (level, message) => log("warn", "node-datachannel", `[${level}] ${message}`));
@@ -68,9 +72,10 @@ try {
 //    Requires (run once):
 //      sudo apt install -y gstreamer1.0-tools gstreamer1.0-plugins-base \
 //        gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-//        gstreamer1.0-plugins-ugly gstreamer1.0-libcamera
+//        gstreamer1.0-plugins-ugly gstreamer1.0-libcamera \
+//        rpicam-apps
 // ─────────────────────────────────────────────────────────────────
-function buildGStreamerPipeline() {
+function buildLibcameraSrcPipeline() {
     return [
         "libcamerasrc",
         // Do not force width/height directly on libcamerasrc. Some Pi cameras
@@ -96,30 +101,109 @@ function buildGStreamerPipeline() {
     ];
 }
 
-function startGStreamer() {
-    if (stopping || gstProcess) return;
+function buildRpicamCaptureArgs() {
+    return [
+        "--timeout", "0",
+        "--nopreview",
+        "--codec", "h264",
+        "--profile", "baseline",
+        "--level", "4.1",
+        "--inline",
+        "--width", String(VIDEO_WIDTH),
+        "--height", String(VIDEO_HEIGHT),
+        "--framerate", String(VIDEO_FPS),
+        "--bitrate", String(VIDEO_BITRATE_KBPS * 1000),
+        "--output", "-"
+    ];
+}
 
-    const pipeline = buildGStreamerPipeline();
+function buildRpicamRtpPipeline() {
+    return [
+        "fdsrc", "fd=0",
+        "!", "video/x-h264,stream-format=byte-stream,alignment=au",
+        "!", "h264parse", "config-interval=1",
+        "!", "rtph264pay", "config-interval=1", `pt=${RTP_PAYLOAD_TYPE}`,
+        "!", "udpsink", `host=${RTP_HOST}`, `port=${RTP_PORT}`, "sync=false", "async=false"
+    ];
+}
+
+function startGStreamer() {
+    if (stopping || gstProcess || cameraProcess) return;
+
+    if (CAMERA_BACKEND === "libcamerasrc") {
+        startLibcameraSrcPipeline();
+    } else {
+        startRpicamPipeline();
+    }
+}
+
+function startLibcameraSrcPipeline() {
+    const pipeline = buildLibcameraSrcPipeline();
     log("info", "GST", "Starting:", `gst-launch-1.0 ${pipeline.join(" ")}`);
 
     gstProcess = spawn("gst-launch-1.0", pipeline, {
         stdio: ["ignore", "pipe", "pipe"]
     });
 
-    gstProcess.on("spawn", () => log("info", "GST", `Started pid=${gstProcess.pid}`));
-    gstProcess.stdout.on("data", d => process.stdout.write(`[${new Date().toISOString()}] [GST:stdout] ${d}`));
-    gstProcess.stderr.on("data", d => process.stderr.write(`[${new Date().toISOString()}] [GST:stderr] ${d}`));
+    attachProcessLogging(gstProcess, "GST", "gst-launch-1.0");
+    gstProcess.on("close", (code, signal) => {
+        gstProcess = null;
+        handleCameraPipelineExit("GST", code, signal);
+    });
+}
 
-    gstProcess.on("error", err => {
-        log("error", "GST", "Failed to start gst-launch-1.0. Is GStreamer installed?", errorDetails(err));
+function startRpicamPipeline() {
+    const captureArgs = buildRpicamCaptureArgs();
+    const rtpPipeline = buildRpicamRtpPipeline();
+
+    log("info", "Camera", "Starting:", `${CAMERA_COMMAND} ${captureArgs.join(" ")}`);
+    log("info", "GST", "Starting RTP payloader:", `gst-launch-1.0 ${rtpPipeline.join(" ")}`);
+
+    cameraProcess = spawn(CAMERA_COMMAND, captureArgs, {
+        stdio: ["ignore", "pipe", "pipe"]
+    });
+    gstProcess = spawn("gst-launch-1.0", rtpPipeline, {
+        stdio: ["pipe", "pipe", "pipe"]
+    });
+
+    cameraProcess.stdout.pipe(gstProcess.stdin);
+    attachProcessLogging(cameraProcess, "Camera", CAMERA_COMMAND);
+    attachProcessLogging(gstProcess, "GST", "gst-launch-1.0");
+
+    cameraProcess.on("close", (code, signal) => {
+        cameraProcess = null;
+        if (gstProcess) {
+            gstProcess.stdin.end();
+        }
+        handleCameraPipelineExit("Camera", code, signal);
     });
 
     gstProcess.on("close", (code, signal) => {
         gstProcess = null;
-        if (stopping) return;
-        log("warn", "GST", `Exited code=${code} signal=${signal}; restarting in ${GST_RESTART_DELAY_MS}ms`);
-        setTimeout(startGStreamer, GST_RESTART_DELAY_MS);
+        if (cameraProcess) {
+            cameraProcess.kill("SIGTERM");
+        }
+        handleCameraPipelineExit("GST", code, signal);
     });
+}
+
+function attachProcessLogging(child, scope, command) {
+    child.on("spawn", () => log("info", scope, `Started ${command} pid=${child.pid}`));
+    child.stdout.on("data", d => process.stdout.write(`[${new Date().toISOString()}] [${scope}:stdout] ${d}`));
+    child.stderr.on("data", d => process.stderr.write(`[${new Date().toISOString()}] [${scope}:stderr] ${d}`));
+    child.on("error", err => {
+        log("error", scope, `Failed to start ${command}. Is it installed?`, errorDetails(err));
+    });
+}
+
+function handleCameraPipelineExit(scope, code, signal) {
+    if (stopping || restartTimer) return;
+
+    log("warn", scope, `Exited code=${code} signal=${signal}; restarting camera pipeline in ${GST_RESTART_DELAY_MS}ms`);
+    restartTimer = setTimeout(() => {
+        restartTimer = null;
+        startGStreamer();
+    }, GST_RESTART_DELAY_MS);
 }
 
 // ─────────────────────────────────────────────────────────────────
@@ -328,6 +412,16 @@ function shutdown() {
 
     for (const id of Object.keys(peers)) {
         cleanup(id, false);
+    }
+
+    if (restartTimer) {
+        clearTimeout(restartTimer);
+        restartTimer = null;
+    }
+
+    if (cameraProcess) {
+        cameraProcess.kill("SIGTERM");
+        cameraProcess = null;
     }
 
     if (gstProcess) {
