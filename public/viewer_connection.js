@@ -18,10 +18,10 @@ socket.on("offer", (id, description) => {
 
     // ── Display the incoming video stream ──
     pc.ontrack = event => {
-        if (event.streams?.[0]) {
-            video.srcObject = event.streams[0];
-            console.log("Video stream attached");
-        }
+        const stream = event.streams?.[0] || new MediaStream([event.track]);
+        video.srcObject = stream;
+        video.play().catch(err => console.warn("Video autoplay failed:", err));
+        console.log("Video stream attached", event.track.kind);
     };
 
     // ── Optional: Pi may also open a data channel ──

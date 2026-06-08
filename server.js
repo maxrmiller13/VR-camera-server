@@ -22,7 +22,7 @@ io.on("connection", socket => {
 
     socket.on("cameraSender", () => {
         cameraSender = socket.id;
-        console.log("Camera sender connected");
+        console.log("Camera sender connected:", socket.id);
     });
 
     socket.on("viewer", () => {
@@ -30,6 +30,8 @@ io.on("connection", socket => {
 
         if (cameraSender) {
             io.to(cameraSender).emit("viewer", socket.id);
+        } else {
+            console.warn("Viewer connected before camera sender was ready:", socket.id);
         }
     });
 
@@ -46,8 +48,12 @@ io.on("connection", socket => {
     });
 
     socket.on("disconnect", () => {
+        if (socket.id === cameraSender) {
+            cameraSender = null;
+            console.warn("Camera sender disconnected");
+        }
         socket.broadcast.emit("disconnectPeer", socket.id);
-        console.log("client disconnected");
+        console.log("client disconnected:", socket.id);
     });
 });
 
