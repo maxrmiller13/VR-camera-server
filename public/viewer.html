@@ -2,22 +2,51 @@
 <html>
     <head>
         <style>
-                html,body{
-                margin:0;
-                padding:0;
-                overflow:hidden;
-                }
+            html, body {
+                margin: 0;
+                padding: 0;
+                background: #000;
+                overflow: hidden;
+            }
 
-                #xrCanvas{
-                width:100vw;
-                height:100vh;
-                }
+            /* Full-viewport video — letterboxed so aspect ratio is preserved */
+            #video {
+                width: 100vw;
+                height: 100vh;
+                object-fit: contain;
+                display: block; /* was "display:show" — invalid, hid the element */
+            }
+
+            /* XR canvas sits on top of the video when VR mode is active */
+            #xrCanvas {
+                position: fixed;
+                top: 0; left: 0;
+                width: 100vw;
+                height: 100vh;
+                display: none;
+                pointer-events: none;
+            }
+
+            #controls {
+                position: fixed;
+                top: 12px;
+                left: 12px;
+                z-index: 10;
+            }
+
+            #controls button {
+                padding: 8px 16px;
+                font-size: 16px;
+                cursor: pointer;
+            }
         </style>
     </head>
     <body>
-        <h2>Viewer</h2>
-        <button onclick="startXR()">Start VR</button>
-        <video id="video" muted autoplay playsinline style="display:show"></video>
+        <video id="video" muted autoplay playsinline></video>
+
+        <div id="controls">
+            <button onclick="startXR()">Start VR</button>
+        </div>
 
         <canvas id="xrCanvas"></canvas>
 
