@@ -1,82 +1,122 @@
-const socket = io();   // auto-connects to the Pi server that served this page
+// ─────────────────────────────────────────────────────────────────
+// viewer_connection.js
+//
+// Talks directly to Janus's "streaming" plugin to watch the mountpoint
+// defined in janus.plugin.streaming.jcfg (id: 1, the Pi camera feed).
+// Janus handles all SDP/ICE/SRTP negotiation — this file just drives the
+// Janus JS client through: attach plugin → send "watch" → get JSEP offer
+// → createAnswer → send "start".
+//
+// Requires janus.js + adapter.js to be loaded on the page before this file.
+// ─────────────────────────────────────────────────────────────────
+
+const MOUNTPOINT_ID = 1; // must match `id` in janus.plugin.streaming.jcfg
+
+// Janus's own HTTPS REST endpoint. By default Janus's HTTP transport
+// listens on 8089 for HTTPS (see janus.transport.http.jcfg). Janus is
+// assumed to be reachable at the same host that served this page.
+const JANUS_SERVER = `https://${window.location.hostname}:8089/janus`;
+
 const video = document.getElementById("video");
+const statusEl = document.getElementById("status");
 video.muted = true;
 
-let pc;
+function setStatus(text) {
+    if (statusEl) statusEl.textContent = text;
+    console.log("[Viewer]", text);
+}
 
-// Announce ourselves to the server so the Pi knows to send us an offer
-socket.emit("viewer");
+let janus = null;
+let streamingHandle = null;
+const opaqueId = "viewer-" + Janus.randomString(12);
 
-// ─────────────────────────────────────────────────────────────────
-// Incoming offer from the Pi (via server relay)
-// ─────────────────────────────────────────────────────────────────
-socket.on("offer", (id, description) => {
+Janus.init({
+    debug: "default",
+    callback: () => {
+        setStatus("connecting to Janus…");
 
-    pc = new RTCPeerConnection({
-        iceServers: [{ urls: "stun:stun.l.google.com:19302" }]
+        janus = new Janus({
+            server: JANUS_SERVER,
+            success: attachStreamingPlugin,
+            error: (err) => setStatus("Janus connection error: " + err),
+            destroyed: () => setStatus("Janus session destroyed")
+        });
+    }
+});
+
+function attachStreamingPlugin() {
+    janus.attach({
+        plugin: "janus.plugin.streaming",
+        opaqueId: opaqueId,
+
+        success: (pluginHandle) => {
+            streamingHandle = pluginHandle;
+            setStatus("attached — requesting stream…");
+            streamingHandle.send({ message: { request: "watch", id: MOUNTPOINT_ID } });
+        },
+
+        error: (err) => setStatus("Plugin attach error: " + err),
+
+        // Messages from the streaming plugin: status updates and, most
+        // importantly, the JSEP offer that kicks off WebRTC negotiation.
+        onmessage: (msg, jsep) => {
+            const result = msg["result"];
+            if (result && result["status"]) {
+                setStatus("stream status: " + result["status"]);
+            }
+            if (msg["error"]) {
+                setStatus("Streaming plugin error: " + msg["error"]);
+                return;
+            }
+
+            if (jsep) {
+                streamingHandle.createAnswer({
+                    jsep: jsep,
+                    // We only receive video — no media of our own to send.
+                    tracks: [{ type: "video", recv: true }],
+                    success: (answerJsep) => {
+                        streamingHandle.send({
+                            message: { request: "start" },
+                            jsep: answerJsep
+                        });
+                    },
+                    error: (err) => setStatus("createAnswer error: " + err)
+                });
+            }
+        },
+
+        // Fired once per incoming media track once negotiation completes.
+        onremotetrack: (track, mid, added) => {
+            if (!added) return;
+            if (track.kind === "video") {
+                setStatus("video track received");
+                const stream = new MediaStream([track]);
+                video.srcObject = stream;
+
+                // Some browsers won't auto-start playback just because
+                // srcObject was assigned after page load, even when muted.
+                video.play().catch(err => setStatus("play() blocked: " + err.message));
+
+                video.onloadedmetadata = () => {
+                    setStatus(`metadata loaded: ${video.videoWidth}x${video.videoHeight}`);
+                };
+
+                // If dimensions never come through, frames aren't decoding —
+                // check Janus's log / chrome://webrtc-internals next.
+                setTimeout(() => {
+                    if (video.videoWidth === 0) {
+                        setStatus("WARNING: no video frames decoded after 5s — check Janus mountpoint / RTP feed");
+                    }
+                }, 5000);
+            }
+        },
+
+        oncleanup: () => {
+            setStatus("stream stopped");
+            video.srcObject = null;
+        },
+
+        ondataopen: () => console.log("[Viewer] Data channel open"),
+        ondata: (data) => console.log("[Viewer] Pi says:", data)
     });
-
-    // ── Display the incoming video stream ──
-    pc.ontrack = event => {
-        const stream = event.streams?.[0] || new MediaStream([event.track]);
-        video.srcObject = stream;
-        video.play().catch(err => console.warn("Video autoplay failed:", err));
-        console.log("Video stream attached", event.track.kind);
-    };
-
-    // ── Optional: Pi may also open a data channel ──
-    pc.ondatachannel = event => {
-        event.channel.onopen = () => console.log("Data channel open");
-        event.channel.onmessage = msg => console.log("Pi says:", msg.data);
-    };
-
-    // ── Send our ICE candidates to the Pi via the server ──
-    pc.onicecandidate = event => {
-        if (event.candidate) {
-            socket.emit("candidate", id, event.candidate);
-        }
-    };
-
-    // NOTE: these are the correct browser WebRTC property names.
-    // (onGatheringStateChange / onSignalingStateChange are node-datachannel
-    //  APIs and will throw in a browser.)
-    pc.oniceconnectionstatechange = () =>
-        console.log("ICE state:", pc.iceConnectionState);
-
-    pc.onsignalingstatechange = () =>
-        console.log("Signaling state:", pc.signalingState);
-
-    // ── Accept offer → build answer → send back ──
-    pc.setRemoteDescription(new RTCSessionDescription(description))
-        .then(() => pc.createAnswer())
-        .then(sdp => pc.setLocalDescription(sdp))
-        .then(() => {
-            socket.emit("answer", id, pc.localDescription);
-            console.log("Answer sent");
-        })
-        .catch(err => console.error("SDP negotiation failed:", err));
-});
-
-// ─────────────────────────────────────────────────────────────────
-// ICE candidates trickling in from the Pi
-// ─────────────────────────────────────────────────────────────────
-socket.on("candidate", async (id, candidate) => {
-    if (!pc) return;
-    try {
-        await pc.addIceCandidate(new RTCIceCandidate(candidate));
-    } catch (err) {
-        console.error("addIceCandidate failed:", err);
-    }
-});
-
-// ─────────────────────────────────────────────────────────────────
-// Pi disconnected
-// ─────────────────────────────────────────────────────────────────
-socket.on("disconnectPeer", () => {
-    if (pc) {
-        pc.close();
-        pc = null;
-        video.srcObject = null;
-        console.log("Camera disconnected");
-    }
-});
+}
