@@ -20,6 +20,7 @@ const express = require("express");
 const https = require("https");
 const fs = require("fs");
 const { spawn } = require("child_process");
+const { Server } = require("socket.io");
 
 // ───────────────────────── Web server ─────────────────────────
 
@@ -32,6 +33,9 @@ const app = express();
 app.use(express.static("public"));
 
 const server = https.createServer(httpsOptions, app);
+
+const io = new Server(server);
+
 server.listen(3000, () => {
     console.log("[HTTP] Viewer page available at https://localhost:3000");
 });
@@ -117,4 +121,28 @@ process.on("SIGINT", () => {
     console.log("\n[Server] Shutting down");
     if (gstProcess) gstProcess.kill();
     process.exit(0);
+});
+
+const { SerialPort } = require('serialport');
+
+const port = new SerialPort({
+    path: '/dev/ttyACM0',
+    baudRate: 115200
+});
+
+io.on('connection', (socket) => {
+
+    console.log('Client connected');
+
+    socket.on("headTracking", (data) => {
+
+    const msg = `${data.yaw.toFixed(1)},${data.pitch.toFixed(1)}\n`;
+
+    console.log("SERIAL OUT:", msg.trim());
+
+    port.write(msg, (err) => {
+        if (err) console.error("Serial write error:", err);
+    });
+});
+
 });

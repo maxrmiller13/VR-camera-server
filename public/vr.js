@@ -53,6 +53,16 @@ const XR_FRAMEBUFFER_SCALE = 'native';
  *
  * @returns {Promise<void>}
  */
+
+// Declare currentOrientation to be used for the camera servos
+let latestYaw = 0;
+let latestPitch = 0;
+
+let yawOffset = 0;
+let pitchOffset = 0;
+
+function checkCalibrationButton(){};
+
 async function startXR() {
   // ── 1. Validate environment ────────────────────────────────────────────────
   if (!navigator.xr) {
@@ -139,10 +149,22 @@ async function startXR() {
 
   // ── 9. Render loop ────────────────────────────────────────────────────────
   function onXRFrame(_time, frame) {
+    // Check for calibration button input
+    checkCalibrationButton(session);
+
+    // Poll current oriontation
+    const pose = frame.getViewerPose(refSpace);
+
+    if (pose) {
+      const euler = quaternionToEuler(pose.views[0].transform.orientation);
+
+      latestYaw = euler.yaw;
+      latestPitch = euler.pitch;
+    }
+
     session.requestAnimationFrame(onXRFrame);
 
     // We need pose to access per-eye viewports and projection matrices.
-    const pose = frame.getViewerPose(refSpace);
     if (!pose) return;
 
     // Upload latest video frame to the GPU texture (once per XR frame)
@@ -334,3 +356,61 @@ function buildFullscreenQuad(gl, attribLoc) {
 
   return { vao, indexCount: indices.length };
 }
+
+function quaternionToEuler(q) {
+    const { x, y, z, w } = q;
+
+    const yaw = Math.atan2(
+        2 * (w * y + x * z),
+        1 - 2 * (y * y + z * z)
+    );
+
+    const pitch = Math.asin(
+        Math.max(-1, Math.min(1,
+            2 * (w * x - y * z)
+        ))
+    );
+
+    return {
+        yaw: yaw * 180 / Math.PI,
+        pitch: pitch * 180 / Math.PI
+    };
+  }
+
+  function calibrate() {
+    yawOffset = latestYaw;
+    pitchOffset = latestPitch;
+
+    console.log("Headset calibrated");
+  }
+
+  let calibratePressed = false;
+
+  function checkCalibrationButton(session) {
+
+      for (const source of session.inputSources) {
+
+          if (!source.gamepad) continue;
+
+          const pressed = source.gamepad.buttons[0].pressed;
+
+          if (pressed && !calibratePressed) {
+              calibrate();
+          }
+
+          calibratePressed = pressed;
+      }
+  }
+
+  const socket = io();
+
+  socket.on("connect", () => {
+      console.log("Socket connected:", socket.id);
+  });
+
+  setInterval(() => {
+    socket.emit("headTracking", {
+        yaw: latestYaw - yawOffset,
+        pitch: latestPitch - pitchOffset
+    });
+  }, 20);   // 20 ms = 50 Hz
